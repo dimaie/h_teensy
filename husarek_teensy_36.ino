@@ -15,9 +15,10 @@
 #define ENC_1                           4
 #define ENC_2                           5
 #define BUTTON_1                        24
-#define SETTINGS_MENU_SIZE              2
+#define SETTINGS_MENU_SIZE              3
 #define FREQ_STEP_IDX                   0
 #define OSC_SHIFT_IDX                   1
+#define OSC_MULT_IDX                    2
 
 typedef void* (*encoder_handler)(int32_t delta, int8_t direction, uint16_t active_steps, void* data);
 
@@ -54,6 +55,8 @@ const uint8_t BUTTON_LONG_PRESSED             = 4;
 const uint8_t BUTTON_SHORT_PRESSED            = 5;
 const uint8_t NO_BUTTON_PRESSED               = 6;
 const uint32_t starting_frequency             = 10000000;
+const uint32_t min_frequency                  = 1500000;
+const uint32_t max_frequency                  = 57000000;
 uint32_t _frequency                           = starting_frequency;
 uint8_t pulses_interval                       = 20;
 const int button_pin_1                        = 32;
@@ -81,6 +84,13 @@ void init_menu() {
   settings[OSC_SHIFT_IDX].item_settings.non_array_settings.min_value = -1000;
   settings[OSC_SHIFT_IDX].item_settings.non_array_settings.max_value = 1000;
   settings[OSC_SHIFT_IDX].item_settings.non_array_settings.step = 100;
+  // oscillator multiplier
+  int32_t _array1[10] = {1, 2, 4};
+  strcpy(settings[OSC_MULT_IDX].prompt, "OscMul:");
+  settings[OSC_MULT_IDX].item_settings.array_settings.length = 3;
+  memcpy(settings[OSC_MULT_IDX].item_settings.array_settings.valid_values, _array1, sizeof(settings[OSC_MULT_IDX].item_settings.array_settings.valid_values));
+  settings[OSC_MULT_IDX].value = 0;
+  settings[OSC_MULT_IDX].is_array = true;
 }
 
 void display_frequency(uint32_t frequency) {
@@ -197,11 +207,20 @@ void* process_settings_menu(Bounce* bounce, void* data) {
 
 void* set_frequency(int32_t delta, int8_t direction, uint16_t active_steps, void* data) {
   int32_t frequency_step = (settings + FREQ_STEP_IDX) -> item_settings.array_settings.valid_values[(settings + FREQ_STEP_IDX) -> value];
+  int32_t osc_mult = (settings + OSC_MULT_IDX) -> item_settings.array_settings.valid_values[(settings + OSC_MULT_IDX) -> value];
   if (delta) {
     _frequency += (direction * active_steps *  frequency_step);
   }
+  if (_frequency < min_frequency) {
+    _frequency = min_frequency;
+  } else if (_frequency > max_frequency) {
+    _frequency = max_frequency;
+  }
+  // apply multiplier and tx shift
+  uint32_t applied_frequency = _frequency * osc_mult;
+  
   display_frequency(_frequency);
-  si570.set_frequency(_frequency);
+  si570.set_frequency(applied_frequency);
   return NULL;
 }
 
