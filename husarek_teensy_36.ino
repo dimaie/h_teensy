@@ -1,3 +1,5 @@
+#include <EEPROM.h>
+
 #include <Bounce.h>
 
 #include <SI570.h>
@@ -54,6 +56,8 @@ const uint8_t MENU_ITEM_PROCESS_COMPLETED     = 3;
 const uint8_t BUTTON_LONG_PRESSED             = 4;
 const uint8_t BUTTON_SHORT_PRESSED            = 5;
 const uint8_t NO_BUTTON_PRESSED               = 6;
+const uint8_t CONF_VERSION                    = 2;
+const uint8_t EEPROM_OFFSET                   = 0;
 const uint32_t starting_frequency             = 10000000;
 const uint32_t min_frequency                  = 1500000;
 const uint32_t max_frequency                  = 57000000;
@@ -69,6 +73,39 @@ SI570 si570;
 
 typedef void* (*button_handler)(Bounce* bounce, void* data);
 
+/*
+ * returns true if configuration was read,
+ * or false otherwise
+ */
+bool read_conf() {
+  byte conf_version = EEPROM.read(EEPROM_OFFSET);  
+  if (conf_version != CONF_VERSION) {
+    return false;
+  }
+  byte size_int = sizeof(int32_t);
+  byte int_array[size_int];
+  byte offset = EEPROM_OFFSET + 1;
+  for (uint8_t i = offset; i < (offset + SETTINGS_MENU_SIZE); ++i) {
+    for (uint8_t k = 0; k < size_int; ++k) {
+      int_array[size_int - 1 - k] = EEPROM.read(i * size_int + k);
+      String s = (String("") + k) + "=" + int_array[k];
+    }
+    memcpy(&(settings[i - offset].value), int_array, size_int);
+  }
+  return true;
+}
+
+void write_conf() {
+  EEPROM.write(EEPROM_OFFSET, CONF_VERSION);
+  
+  byte offset = EEPROM_OFFSET + 1;
+  byte size_int = sizeof(int32_t);
+  for (uint8_t i = offset; i < offset + SETTINGS_MENU_SIZE; ++i) {
+    for (uint8_t k = 0; k < size_int; ++k) {
+      EEPROM.write(i * size_int + k, (settings[i - offset].value >> ((size_int - (k + 1))* 8)) & 0xFF);
+    }
+  }
+}
 void init_menu() {
   // frequency step
   int32_t _array[10] = {10, 50, 100, 1000, 10000, 100000, 1000000};
@@ -200,7 +237,8 @@ void* process_settings_menu(Bounce* bounce, void* data) {
   
   // clear screen
   lcd.setCursor(0, 0);
-  lcd.print("                ");  
+  lcd.print("                ");
+  write_conf();  
   return &MENU_PROCESS_COMPLETED;
 }
 
@@ -255,6 +293,10 @@ void setup() {
 
   set_frequency(0, 0, 0, NULL);
   init_menu();
+
+  if (!read_conf()) {
+    write_conf();
+  }
 }
 
 void loop() {
