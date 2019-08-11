@@ -17,15 +17,27 @@
 
 
 #define LCD_ADDR                        0x27
+#define P0                              0
+#define P1                              1
+#define P2                              2
+#define P3                              3
+#define P4                              4
+#define P5                              5
+#define P6                              6
+#define P7                              7
 #define ENC_1                           4
 #define ENC_2                           5
 #define BUTTON_1                        24
-#define SETTINGS_MENU_SIZE              3
+#define SETTINGS_MENU_SIZE              7
 #define FREQ_STEP_IDX                   0
-#define OSC_SHIFT_IDX                   1
-#define OSC_MULT_IDX                    2
+#define ATT_IDX                         1
+#define AMP_1_IDX                       2
+#define AMP_2_IDX                       3
+#define OSC_SHIFT_IDX                   4
+#define OSC_MULT_IDX                    5
+#define INPUT_L_SENS_IDX                6
 #define ROUTE_RX                        0     // used for all recieve modes
-#define INITIAL_VOLUME                  1   // 0-1.0 output volume on startup
+#define INITIAL_VOLUME                  .5   // 0-1.0 output volume on startup
 #define RX_LEVEL_I                      1.0   // 0-1.0 adjust for RX I/Q balance
 #define RX_LEVEL_Q                      1.0   // 0-1.0 adjust for RX I/Q balance
 #define IF_FREQ                         11000 // IF Oscillator frequency
@@ -38,6 +50,15 @@
 #define SSB_LSB                         1
 #define CW                              2
 #define CWR                             3
+// offset of main module switches
+#define R_T_OFF                         0
+#define ATT_OFF                         1
+#define AMP_1_OFF                       2
+#define AMP_2_OFF                       3
+#define CW_OFF                          4
+#define RX_OFF                          5
+#define TX_OFF                          6
+
 typedef void* (*encoder_handler)(int32_t delta, int8_t direction, uint16_t active_steps, void* data);
 
 struct MenuItem {
@@ -81,7 +102,8 @@ uint32_t _frequency                           = starting_frequency;
 uint8_t pulses_interval                       = 20;
 const int button_pin_1                        = 32;
 uint8_t settings_index                        = 0;
-const int input_rx                             = AUDIO_INPUT_LINEIN;
+const int input_rx                            = AUDIO_INPUT_LINEIN;
+uint8_t radio_board_config                    = 0;
 
 Bounce button_1 = Bounce(button_pin_1, 5);
 Encoder encoder(ENC_1, ENC_2);
@@ -159,6 +181,25 @@ bool read_conf() {
   return true;
 }
 
+void set_radio_board_config(uint8_t value, uint8_t offset) {
+  radio_board_config = value ? (radio_board_config | (1 << offset)) : (radio_board_config & ~(1 << offset));
+}
+
+void apply_settings() {
+  uint8_t _radio_board_config = radio_board_config;
+  set_radio_board_config(settings[AMP_1_IDX].value, P2);
+  set_radio_board_config(settings[AMP_2_IDX].value, P3);
+  set_radio_board_config(settings[ATT_IDX].value, P1);
+  // update frequency, in case if multiplier has been changed
+  update_frequency();
+  // update line sensitivity
+  uint8_t line_in_sens = settings[INPUT_L_SENS_IDX].value;
+  audio_shield.lineInLevel(line_in_sens, line_in_sens);
+  // update radio board configuration, in case if it has been changed
+  if (_radio_board_config != radio_board_config) {
+    PCF_39.write8(radio_board_config);
+  }
+}
 void write_conf() {
   EEPROM.write(EEPROM_OFFSET, CONF_VERSION);
 
@@ -178,6 +219,27 @@ void init_menu() {
   memcpy(settings[FREQ_STEP_IDX].item_settings.array_settings.valid_values, _array, sizeof(settings[FREQ_STEP_IDX].item_settings.array_settings.valid_values));
   settings[FREQ_STEP_IDX].value = 1;
   settings[FREQ_STEP_IDX].is_array = true;
+  // attenuator shift
+  strcpy(settings[ATT_IDX].prompt, "Atten:");
+  settings[ATT_IDX].value = 0;
+  settings[ATT_IDX].is_array = false;
+  settings[ATT_IDX].item_settings.non_array_settings.min_value = 0;
+  settings[ATT_IDX].item_settings.non_array_settings.max_value = 1;
+  settings[ATT_IDX].item_settings.non_array_settings.step = 1;
+  // amplifier 1 shift
+  strcpy(settings[AMP_1_IDX].prompt, "Amp 1:");
+  settings[AMP_1_IDX].value = 1;
+  settings[AMP_1_IDX].is_array = false;
+  settings[AMP_1_IDX].item_settings.non_array_settings.min_value = 0;
+  settings[AMP_1_IDX].item_settings.non_array_settings.max_value = 1;
+  settings[AMP_1_IDX].item_settings.non_array_settings.step = 1;
+  // amplifier 2 shift
+  strcpy(settings[AMP_2_IDX].prompt, "Amp 2:");
+  settings[AMP_2_IDX].value = 1;
+  settings[AMP_2_IDX].is_array = false;
+  settings[AMP_2_IDX].item_settings.non_array_settings.min_value = 0;
+  settings[AMP_2_IDX].item_settings.non_array_settings.max_value = 1;
+  settings[AMP_2_IDX].item_settings.non_array_settings.step = 1;
   // oscillator tx shift
   strcpy(settings[OSC_SHIFT_IDX].prompt, "TX Shift:");
   settings[OSC_SHIFT_IDX].value = 700;
@@ -192,6 +254,13 @@ void init_menu() {
   memcpy(settings[OSC_MULT_IDX].item_settings.array_settings.valid_values, _array1, sizeof(settings[OSC_MULT_IDX].item_settings.array_settings.valid_values));
   settings[OSC_MULT_IDX].value = 0;
   settings[OSC_MULT_IDX].is_array = true;
+  // input line sensitivity shift
+  strcpy(settings[INPUT_L_SENS_IDX].prompt, "InSens:");
+  settings[INPUT_L_SENS_IDX].value = 7;
+  settings[INPUT_L_SENS_IDX].is_array = false;
+  settings[INPUT_L_SENS_IDX].item_settings.non_array_settings.min_value = 0;
+  settings[INPUT_L_SENS_IDX].item_settings.non_array_settings.max_value = 15;
+  settings[INPUT_L_SENS_IDX].item_settings.non_array_settings.step = 1;
 }
 
 void display_frequency(uint32_t frequency) {
@@ -326,6 +395,10 @@ void* set_frequency(int32_t delta, int8_t direction, uint16_t active_steps, void
   return NULL;
 }
 
+void update_frequency() {
+  set_frequency(0, 0, 0, NULL);
+}
+
 void* handle_encoder(void* data, encoder_handler handler) {
   int16_t delta = encoder.read();
   if (delta) {
@@ -411,8 +484,6 @@ void setup() {
     write_conf();
   }
 
-  PCF_39.write8(0b00101100);
-
   AudioMemory(16);
 
   // Enable the audio shield and set the output volume.
@@ -427,7 +498,8 @@ void loop() {
   if (handle_button(&button_1, process_settings_menu, NULL) == &MENU_PROCESS_COMPLETED) {
     // process_menu_settings clears screen, so update frequency
     // after it has been completed
-    set_frequency(0, 0, 0, NULL);
+    update_frequency();
   }
+  apply_settings();
   handle_encoder(NULL, set_frequency);
 }
