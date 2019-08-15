@@ -100,12 +100,16 @@ const uint32_t min_frequency                  = 1500000;
 const uint32_t max_frequency                  = 57000000;
 uint32_t _frequency                           = starting_frequency;
 uint8_t pulses_interval                       = 20;
-const int button_pin_1                        = 32;
+const uint8_t button_pin_1                    = 32;
+const uint8_t button_pin_2                    = 30;
 uint8_t settings_index                        = 0;
 const int input_rx                            = AUDIO_INPUT_LINEIN;
 uint8_t radio_board_config                    = 0;
+float volume                                  = INITIAL_VOLUME;
 
-Bounce button_1 = Bounce(button_pin_1, 5);
+Bounce menu_button = Bounce(button_pin_1, 5);
+Bounce function_button = Bounce(button_pin_2, 5);
+
 Encoder encoder(ENC_1, ENC_2);
 LiquidCrystal_I2C lcd(LCD_ADDR, 16, 2);
 SI570 si570;
@@ -375,6 +379,54 @@ void* process_settings_menu(Bounce* bounce, void* data) {
   return &MENU_PROCESS_COMPLETED;
 }
 
+void* set_volume(int32_t delta, int8_t direction, uint16_t active_steps, void* data) {
+  float max_volume = 1;
+  float min_volume = 0;
+  volume += (direction * .1);
+  if (volume > max_volume) {
+    volume = max_volume;
+  } else if (volume < min_volume) {
+    volume = min_volume;
+  }
+  return NULL;
+}
+
+void display_volume() {
+  char ch_volume[17];
+  strcpy(ch_volume, "                \0");
+  float i = 0;
+  float step = 1.0 / 16;
+  for (int8_t k = 0; k < 17; ++k, i += step) {
+    ch_volume[k] = i <= volume ? 255 : ' ';
+  }
+  lcd.setCursor(0, 1);
+  lcd.print(ch_volume);
+}
+
+void* process_volume(Bounce* bounce, void* data) {
+  lcd.setCursor(0, 1);
+  lcd.print("                ");
+  display_volume();
+  do {
+    data = handle_button(bounce, NULL, data);
+    if (data == &BUTTON_SHORT_PRESSED) {
+      break;
+    }
+    //
+    float _volume = volume;
+    handle_encoder(NULL, set_volume);
+    if (volume != _volume) {
+      display_volume();
+      audio_shield.volume(volume);    
+    }
+    delay(50);
+  } while (true);
+
+  // clear screen
+  lcd.setCursor(0, 1);
+  lcd.print("                ");
+  return &MENU_PROCESS_COMPLETED;
+}
 
 void* set_frequency(int32_t delta, int8_t direction, uint16_t active_steps, void* data) {
   int32_t frequency_step = (settings + FREQ_STEP_IDX) -> item_settings.array_settings.valid_values[(settings + FREQ_STEP_IDX) -> value];
@@ -468,11 +520,12 @@ void setup() {
   Serial.begin(9600);
 
   pinMode(button_pin_1, INPUT_PULLUP);
+  pinMode(button_pin_2, INPUT_PULLUP);
 
   // init lcd
   lcd.init();                           // initialize the lcd
   lcd.backlight();
-
+  
   si570.init();
 
   encoder.write(0);
@@ -488,15 +541,20 @@ void setup() {
 
   // Enable the audio shield and set the output volume.
   audio_shield.enable();
-  audio_shield.volume(INITIAL_VOLUME);
+  audio_shield.volume(volume);
   audio_shield.unmuteLineout();
 
-  setup_RX(SSB_USB);
+  setup_RX(CW);
 }
 
 void loop() {
-  if (handle_button(&button_1, process_settings_menu, NULL) == &MENU_PROCESS_COMPLETED) {
+  if (handle_button(&menu_button, process_settings_menu, NULL) == &MENU_PROCESS_COMPLETED) {
     // process_menu_settings clears screen, so update frequency
+    // after it has been completed
+    update_frequency();
+  }
+  if (handle_button(&function_button, process_volume, NULL) == &MENU_PROCESS_COMPLETED) {
+    // process_volume clears screen, so update frequency
     // after it has been completed
     update_frequency();
   }
