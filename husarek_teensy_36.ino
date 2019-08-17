@@ -1,7 +1,6 @@
 #include <Audio.h>
 
 #include <EEPROM.h>
-#include <Bounce.h>
 
 #include <SI570.h>
 #include <unistd.h>
@@ -14,7 +13,7 @@
 #include <Encoder.h>
 #include "filters.h"
 #include "PCF8574.h"
-
+#include "buttons_handler.h"
 
 #define LCD_ADDR                        0x27
 #define P0                              0
@@ -58,8 +57,6 @@
 #define CW_OFF                          4
 #define RX_OFF                          5
 #define TX_OFF                          6
-
-typedef void* (*encoder_handler)(int32_t delta, int8_t direction, uint16_t active_steps, void* data);
 
 struct FilterArray {
   short* f_array;
@@ -111,16 +108,12 @@ struct MenuItem {
 MenuItem settings[SETTINGS_MENU_SIZE];
 const uint8_t MENU_PROCESS_COMPLETED          = 2;
 const uint8_t MENU_ITEM_PROCESS_COMPLETED     = 3;
-const uint8_t BUTTON_LONG_PRESSED             = 4;
-const uint8_t BUTTON_SHORT_PRESSED            = 5;
-const uint8_t NO_BUTTON_PRESSED               = 6;
 const uint8_t CONF_VERSION                    = 2;
 const uint8_t EEPROM_OFFSET                   = 0;
 const uint32_t starting_frequency             = 10000000;
 const uint32_t min_frequency                  = 1500000;
 const uint32_t max_frequency                  = 57000000;
 uint32_t _frequency                           = starting_frequency;
-uint8_t pulses_interval                       = 20;
 const uint8_t button_pin_1                    = 32;
 const uint8_t button_pin_2                    = 31;
 uint8_t settings_index                        = 0;
@@ -136,7 +129,6 @@ Encoder encoder(ENC_1, ENC_2);
 LiquidCrystal_I2C lcd(LCD_ADDR, 16, 2);
 SI570 si570;
 
-typedef void* (*button_handler)(Bounce* bounce, void* data);
 AudioInputI2S       audio_input;           // Audio Shield: mic or line-in
 // Create the Audio components.  These should be created in the
 // order data flows, inputs/sources -> processing -> outputs
@@ -348,74 +340,12 @@ void* set_menu_item_value(int32_t delta, int8_t direction, uint16_t active_steps
   return NULL;
 }
 
-bool is_long_press(Bounce* bounce) {
-  return get_button_press_interval(bounce) > 600;
-}
-
-/*
-   returns time interval for the pressed button
-*/
-uint32_t get_button_press_interval(Bounce* bounce) {
-  uint32_t interval = millis();
-  do {
-    bounce -> update();
-    delay(20);
-  } while (bounce -> read() == LOW);
-  return millis() - interval;
-}
-
-/*
-   button handler
-*/
-void* button_handle(Bounce* bounce, button_handler handler, void* data) {
-  void* result = &NO_BUTTON_PRESSED;
-  bounce -> update();
-  if (bounce -> read() == LOW) {
-    if (is_long_press(bounce)) {
-      Serial.println("long press");
-      return &BUTTON_LONG_PRESSED;
-    }
-    Serial.println("short press");
-    result = &BUTTON_SHORT_PRESSED;
-    if (handler) {
-      Serial.println("handler_button");
-      result = handler(bounce, data);
-      Serial.println("exit handle_button");
-    }
-    delay(100);
-  }
-  return result;
-}
-
-/*
-   button handler with handle functions for short and long clicks 
-*/
-void* slbutton_handle(Bounce* bounce, button_handler handler_short, button_handler handler_long, void* data) {
-  void* result = &NO_BUTTON_PRESSED;
-  bounce -> update();
-  if (bounce -> read() == LOW) {
-    if (is_long_press(bounce)) {
-      result = &BUTTON_LONG_PRESSED;
-      if (handler_long) {
-        result = handler_long(bounce, data);
-      } 
-    } else {
-      result = &BUTTON_SHORT_PRESSED;
-      if (handler_short) {
-        result = handler_short(bounce, data);
-      } 
-    }
-    delay(100);
-  }
-  return result;
-}
-
 void* process_settings_menu(Bounce* bounce, void* data) {
   display_menu_item();
   // change item index until long press
   do {
     data = button_handle(bounce, NULL, data);
-    if (data == &BUTTON_SHORT_PRESSED) {
+    if (data == BUTTON_SHORT_PRESSED) {
       // increment menu index and redraw menu item
       ++settings_index;
       if (settings_index == SETTINGS_MENU_SIZE) {
@@ -431,13 +361,13 @@ void* process_settings_menu(Bounce* bounce, void* data) {
       display_menu_item();
     }
     delay(50);
-  } while (data != &BUTTON_LONG_PRESSED);
+  } while (data != BUTTON_LONG_PRESSED);
 
   // clear screen
   lcd.setCursor(0, 0);
   lcd.print("                ");
   write_conf();
-  return &MENU_PROCESS_COMPLETED;
+  return MENU_PROCESS_COMPLETED;
 }
 
 void* set_volume(int32_t delta, int8_t direction, uint16_t active_steps, void* data) {
@@ -470,7 +400,7 @@ void* volume_process(Bounce* bounce, void* data) {
   display_volume();
   do {
     data = button_handle(bounce, NULL, data);
-    if (data == &BUTTON_SHORT_PRESSED) {
+    if (data == BUTTON_SHORT_PRESSED) {
       break;
     }
     //
@@ -486,7 +416,7 @@ void* volume_process(Bounce* bounce, void* data) {
   // clear screen
   lcd.setCursor(0, 1);
   lcd.print("                ");
-  return &MENU_PROCESS_COMPLETED;
+  return MENU_PROCESS_COMPLETED;
 }
 
 void* set_frequency(int32_t delta, int8_t direction, uint16_t active_steps, void* data) {
@@ -510,22 +440,6 @@ void* set_frequency(int32_t delta, int8_t direction, uint16_t active_steps, void
 
 void update_frequency() {
   set_frequency(0, 0, 0, NULL);
-}
-
-void* handle_encoder(void* data, encoder_handler handler) {
-  int16_t delta = encoder.read();
-  if (delta) {
-    // multiplier for frequency steps
-    uint16_t active_steps = (uint16_t)(abs(delta) / pulses_interval);
-    if (active_steps) {
-      encoder.write(0);
-      int8_t direction = delta > 0 ? 1 : (delta == 0 ? 0 : -1);
-      if (handler) {
-        return handler(delta, direction, active_steps, data);
-      }
-    }
-  }
-  return NULL;
 }
 
 float audiolevels_I[1][4] = {
@@ -618,7 +532,7 @@ void* mode_process(Bounce* bounce, void* data) {
   display_mode();
   do {
     data = button_handle(bounce, NULL, data);
-    if (data == &BUTTON_SHORT_PRESSED) {
+    if (data == BUTTON_SHORT_PRESSED) {
       break;
     }
     int8_t _mode_current = mode_current;
@@ -633,17 +547,17 @@ void* mode_process(Bounce* bounce, void* data) {
   // clear screen
   lcd.setCursor(0, 1);
   lcd.print("                ");
-  return &MENU_PROCESS_COMPLETED;
+  return MENU_PROCESS_COMPLETED;
 }
 
 void loop() {
   uint8_t old_radio_board_config = radio_board_config;
-  if (button_handle(&menu_button, process_settings_menu, NULL) == &MENU_PROCESS_COMPLETED) {
+  if (button_handle(&menu_button, process_settings_menu, NULL) == MENU_PROCESS_COMPLETED) {
     // apply settings
     apply_settings(old_radio_board_config);
   }
   
-  if (slbutton_handle(&function_button, volume_process, mode_process, NULL) == &MENU_PROCESS_COMPLETED) {
+  if (slbutton_handle(&function_button, volume_process, mode_process, NULL) == MENU_PROCESS_COMPLETED) {
     // process_volume clears screen, so update frequency
     // after it has been completed
     update_frequency();
