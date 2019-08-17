@@ -46,10 +46,10 @@
 #define TONE_TYPE_SQUARE                2
 #define TONE_TYPE_TRIANGLE              3
 // radio operation mode defines used for filter selections etc
-#define SSB_USB                         0
-#define SSB_LSB                         1
-#define CW                              2
-#define CWR                             3
+#define CW                              0
+#define SSB_USB                         1
+#define CWR                             2
+#define SSB_LSB                         3
 // offset of main module switches
 #define R_T_OFF                         0
 #define ATT_OFF                         1
@@ -60,6 +60,27 @@
 #define TX_OFF                          6
 
 typedef void* (*encoder_handler)(int32_t delta, int8_t direction, uint16_t active_steps, void* data);
+
+struct FilterArray {
+  short* f_array;
+  uint16_t len;
+};
+
+FilterArray filters[] = {
+  {.f_array = postfir_700, .len = COEFF_700}, 
+  {.f_array = postfir_lpf, .len = COEFF_LPF},
+  {.f_array = firbpf_usb, .len = BPF_COEFFS}, 
+  {.f_array = firbpf_lsb, .len = BPF_COEFFS}
+};
+
+struct Mode {
+  uint8_t mode;
+  char label[5];
+  FilterArray* bpf;
+  FilterArray* lpf;
+};
+
+Mode modes[4];
 
 struct MenuItem {
   // prompt to display
@@ -101,11 +122,12 @@ const uint32_t max_frequency                  = 57000000;
 uint32_t _frequency                           = starting_frequency;
 uint8_t pulses_interval                       = 20;
 const uint8_t button_pin_1                    = 32;
-const uint8_t button_pin_2                    = 30;
+const uint8_t button_pin_2                    = 31;
 uint8_t settings_index                        = 0;
 const int input_rx                            = AUDIO_INPUT_LINEIN;
 uint8_t radio_board_config                    = 0;
 float volume                                  = INITIAL_VOLUME;
+int8_t mode_current                           = CW;
 
 Bounce menu_button = Bounce(button_pin_1, 5);
 Bounce function_button = Bounce(button_pin_2, 5);
@@ -189,8 +211,7 @@ void set_radio_board_config(uint8_t value, uint8_t offset) {
   radio_board_config = value ? (radio_board_config | (1 << offset)) : (radio_board_config & ~(1 << offset));
 }
 
-void apply_settings() {
-  uint8_t _radio_board_config = radio_board_config;
+void apply_settings(uint8_t old_radio_board_config) {
   set_radio_board_config(settings[AMP_1_IDX].value, P2);
   set_radio_board_config(settings[AMP_2_IDX].value, P3);
   set_radio_board_config(settings[ATT_IDX].value, P1);
@@ -198,9 +219,9 @@ void apply_settings() {
   update_frequency();
   // update line sensitivity
   uint8_t line_in_sens = settings[INPUT_L_SENS_IDX].value;
-  audio_shield.lineInLevel(line_in_sens, line_in_sens);
+  audio_shield.lineInLevel(line_in_sens);
   // update radio board configuration, in case if it has been changed
-  if (_radio_board_config != radio_board_config) {
+  if (old_radio_board_config != radio_board_config) {
     PCF_39.write8(radio_board_config);
   }
 }
@@ -216,6 +237,23 @@ void write_conf() {
   }
 }
 void init_menu() {
+  // modes
+  strcpy(modes[CW].label, "CW");
+  modes[CW].mode = CW;
+  modes[CW].bpf = &filters[2];
+  modes[CW].lpf = &filters[0];
+  strcpy(modes[SSB_USB].label, "USB");
+  modes[SSB_USB].mode = SSB_USB;
+  modes[SSB_USB].bpf = &filters[2];
+  modes[SSB_USB].lpf = &filters[1];
+  strcpy(modes[CWR].label, "CWR");
+  modes[CWR].mode = CWR;
+  modes[CWR].bpf = &filters[3];
+  modes[CWR].lpf = &filters[0];
+  strcpy(modes[SSB_LSB].label, "LSB");
+  modes[SSB_LSB].mode = SSB_LSB;
+  modes[SSB_LSB].bpf = &filters[3];
+  modes[SSB_LSB].lpf = &filters[1];   
   // frequency step
   int32_t _array[10] = {10, 50, 100, 1000, 10000, 100000, 1000000};
   strcpy(settings[FREQ_STEP_IDX].prompt, "Step:");
@@ -329,7 +367,7 @@ uint32_t get_button_press_interval(Bounce* bounce) {
 /*
    button handler
 */
-void* handle_button(Bounce* bounce, button_handler handler, void* data) {
+void* button_handle(Bounce* bounce, button_handler handler, void* data) {
   void* result = &NO_BUTTON_PRESSED;
   bounce -> update();
   if (bounce -> read() == LOW) {
@@ -349,11 +387,34 @@ void* handle_button(Bounce* bounce, button_handler handler, void* data) {
   return result;
 }
 
+/*
+   button handler with handle functions for short and long clicks 
+*/
+void* slbutton_handle(Bounce* bounce, button_handler handler_short, button_handler handler_long, void* data) {
+  void* result = &NO_BUTTON_PRESSED;
+  bounce -> update();
+  if (bounce -> read() == LOW) {
+    if (is_long_press(bounce)) {
+      result = &BUTTON_LONG_PRESSED;
+      if (handler_long) {
+        result = handler_long(bounce, data);
+      } 
+    } else {
+      result = &BUTTON_SHORT_PRESSED;
+      if (handler_short) {
+        result = handler_short(bounce, data);
+      } 
+    }
+    delay(100);
+  }
+  return result;
+}
+
 void* process_settings_menu(Bounce* bounce, void* data) {
   display_menu_item();
   // change item index until long press
   do {
-    data = handle_button(bounce, NULL, data);
+    data = button_handle(bounce, NULL, data);
     if (data == &BUTTON_SHORT_PRESSED) {
       // increment menu index and redraw menu item
       ++settings_index;
@@ -403,12 +464,12 @@ void display_volume() {
   lcd.print(ch_volume);
 }
 
-void* process_volume(Bounce* bounce, void* data) {
+void* volume_process(Bounce* bounce, void* data) {
   lcd.setCursor(0, 1);
   lcd.print("                ");
   display_volume();
   do {
-    data = handle_button(bounce, NULL, data);
+    data = button_handle(bounce, NULL, data);
     if (data == &BUTTON_SHORT_PRESSED) {
       break;
     }
@@ -481,13 +542,14 @@ void audio_channel_setup(int route) {
     audio_selector_q.gain(i, audiolevels_Q[route][i]);
   }
 }
+
 // set up radio for RX modes - USB, LSB etc
 void setup_RX(int mode) {
   AudioNoInterrupts();   // Disable Audio while reconfiguring filters
 
   audio_shield.inputSelect(input_rx); // RX mode uses line ins
   audio_channel_setup(ROUTE_RX);   // switch audio path to RX processing chain
-  audio_shield.lineInLevel(7);
+  audio_shield.lineInLevel(settings[INPUT_L_SENS_IDX].value);
 
   if_osc.begin(1.0, IF_FREQ, TONE_TYPE_SINE);
 
@@ -495,24 +557,10 @@ void setup_RX(int mode) {
   hilbert_45_i.begin(RX_hilbertm45, HILBERT_COEFFS);
   hilbert_45_q.begin(RX_hilbert45, HILBERT_COEFFS);
 
-  if ((mode == SSB_LSB) || (mode == CWR))             // LSB modes
-    fir_bpf.begin(firbpf_lsb, BPF_COEFFS);      // 2.4kHz LSB filter
-  else fir_bpf.begin(firbpf_usb, BPF_COEFFS);      // 2.4kHz USB filter
+  Mode struct_mode = modes[mode];
+  fir_bpf.begin(struct_mode.bpf -> f_array, struct_mode.bpf -> len);
+  post_fir.begin(struct_mode.lpf -> f_array, struct_mode.lpf -> len);
 
-  switch (mode) {
-    case CWR:
-      post_fir.begin(postfir_700, COEFF_700);    // 700 Hz LSB filter
-      break;
-    case SSB_LSB:
-      post_fir.begin(postfir_lpf, COEFF_LPF);    // 2.4kHz LSB filter
-      break;
-    case CW:
-      post_fir.begin(postfir_700, COEFF_700);    // 700 Hz LSB filter
-      break;
-    case SSB_USB:
-      post_fir.begin(postfir_lpf, COEFF_LPF);    // 2.4kHz LSB filter
-      break;
-  }
   AudioInterrupts();
 }
 
@@ -544,20 +592,62 @@ void setup() {
   audio_shield.volume(volume);
   audio_shield.unmuteLineout();
 
-  setup_RX(CW);
+  setup_RX(mode_current);
+}
+void display_mode() {
+  lcd.setCursor(0, 1);
+  String str = String("Mode: ") + String(modes[mode_current].label) + "     ";
+  lcd.print(str.c_str());
+}
+
+void* set_mode(int32_t delta, int8_t direction, uint16_t active_steps, void* data) {
+  int8_t max_mode = 3;
+  int8_t min_mode = 0;
+  mode_current += direction;
+  if (mode_current > max_mode) {
+    mode_current = max_mode;
+  } else if (mode_current < min_mode) {
+    mode_current = min_mode;
+  }
+  return NULL;
+}
+
+void* mode_process(Bounce* bounce, void* data) {
+  lcd.setCursor(0, 1);
+  lcd.print("                ");
+  display_mode();
+  do {
+    data = button_handle(bounce, NULL, data);
+    if (data == &BUTTON_SHORT_PRESSED) {
+      break;
+    }
+    int8_t _mode_current = mode_current;
+    handle_encoder(NULL, set_mode);
+    if (_mode_current != mode_current) {
+      display_mode();
+      setup_RX(mode_current);
+    }
+    delay(50);
+  } while (true);
+
+  // clear screen
+  lcd.setCursor(0, 1);
+  lcd.print("                ");
+  return &MENU_PROCESS_COMPLETED;
 }
 
 void loop() {
-  if (handle_button(&menu_button, process_settings_menu, NULL) == &MENU_PROCESS_COMPLETED) {
-    // process_menu_settings clears screen, so update frequency
-    // after it has been completed
-    update_frequency();
+  uint8_t old_radio_board_config = radio_board_config;
+  if (button_handle(&menu_button, process_settings_menu, NULL) == &MENU_PROCESS_COMPLETED) {
+    // apply settings
+    apply_settings(old_radio_board_config);
   }
-  if (handle_button(&function_button, process_volume, NULL) == &MENU_PROCESS_COMPLETED) {
+  
+  if (slbutton_handle(&function_button, volume_process, mode_process, NULL) == &MENU_PROCESS_COMPLETED) {
     // process_volume clears screen, so update frequency
     // after it has been completed
     update_frequency();
   }
-  apply_settings();
+  
   handle_encoder(NULL, set_frequency);
 }
