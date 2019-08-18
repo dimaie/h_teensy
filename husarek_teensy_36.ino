@@ -36,10 +36,15 @@
 #define OSC_MULT_IDX                    5
 #define INPUT_L_SENS_IDX                6
 #define ROUTE_RX                        0     // used for all recieve modes
-#define INITIAL_VOLUME                  .5   // 0-1.0 output volume on startup
+#define ROUTE_CW_TX                     1     // CW modes
+#define INITIAL_VOLUME                  .5    // 0-1.0 output volume on startup
+#define CW_SIDETONE_VOLUME              0.25  // 0-1.0 level for CW TX mode
+#define CW_TX_LEVEL_I                   1.0   // 0-1.0 adjust for CW TX I/Q balance
+#define CW_TX_LEVEL_Q                   0.956 // 0-1.0 adjust for CW TX I/Q balance
 #define RX_LEVEL_I                      1.0   // 0-1.0 adjust for RX I/Q balance
 #define RX_LEVEL_Q                      1.0   // 0-1.0 adjust for RX I/Q balance
 #define IF_FREQ                         11000 // IF Oscillator frequency
+#define CW_FREQ                         700   // audio tone frequency used for CW
 #define TONE_TYPE_SINE                  0
 #define TONE_TYPE_SAWTOOTH              1
 #define TONE_TYPE_SQUARE                2
@@ -147,6 +152,8 @@ AudioMixer4         audio_selector_i;   // summer used for AGC and audio switch
 AudioMixer4         audio_selector_q;   // summer used as audio selector
 AudioAnalyzePeak    agc_peak;       // Measure Audio Peak for AGC use
 AudioOutputI2S      audio_output;   // Audio Shield: headphones & line-out
+AudioSynthWaveform  cw_tone_i;           // Oscillator for CW tone I (sine)
+AudioSynthWaveform  cw_tone_q;           // Oscillator for CW tone Q (cosine)
 
 AudioControlSGTL5000 audio_shield;  // Create an object to control the audio shield.
 
@@ -172,6 +179,8 @@ AudioConnection c30(post_fir, 0, smeter, 0);         // RX signal S-Meter measur
 //
 AudioConnection c31(post_fir, 0, audio_selector_i, ROUTE_RX);           // mono RX audio and AGC Gain loop adjust
 AudioConnection c32(post_fir, 0, audio_selector_q, ROUTE_RX);           // mono RX audio to 2nd channel
+AudioConnection c35(cw_tone_i, 0, audio_selector_i, ROUTE_CW_TX);         // CW TX I audio 
+AudioConnection c36(cw_tone_q, 0, audio_selector_q, ROUTE_CW_TX);         // CW TX Q audio
 AudioConnection c40(audio_selector_i, 0, agc_peak, 0);                  // AGC Gain loop measure
 AudioConnection c41(audio_selector_i, 0, audio_output, 0);              // Output the sum on both channels
 AudioConnection c42(audio_selector_q, 0, audio_output, 1);
@@ -442,23 +451,25 @@ void update_frequency() {
   set_frequency(0, 0, 0, NULL);
 }
 
-float audiolevels_I[1][4] = {
+float audiolevels_i[2][4] = {
   RX_LEVEL_I, 0, 0, 0,        // RX mode channel levels
+  0, 0, CW_TX_LEVEL_I, 0      // CW TX mode channel levels
 };
 
-float audiolevels_Q[1][4] = {
+float audiolevels_q[2][4] = {
   RX_LEVEL_Q, 0, 0, 0,        // RX mode channel levels
+  0, 0, CW_TX_LEVEL_Q, 0      // CW TX mode channel levels
 };
 
 void audio_channel_setup(int route) {
   for (int i = 0; i < 4 ; ++i) {
-    audio_selector_i.gain(i, audiolevels_I[route][i]); // set gains on audioselector channels
-    audio_selector_q.gain(i, audiolevels_Q[route][i]);
+    audio_selector_i.gain(i, audiolevels_i[route][i]); // set gains on audioselector channels
+    audio_selector_q.gain(i, audiolevels_q[route][i]);
   }
 }
 
 // set up radio for RX modes - USB, LSB etc
-void setup_RX(int mode) {
+void init_rx(int mode) {
   AudioNoInterrupts();   // Disable Audio while reconfiguring filters
 
   audio_shield.inputSelect(input_rx); // RX mode uses line ins
@@ -476,6 +487,24 @@ void setup_RX(int mode) {
   post_fir.begin(struct_mode.lpf -> f_array, struct_mode.lpf -> len);
 
   AudioInterrupts();
+}
+
+void init_tx(int mode) {
+  AudioNoInterrupts();    // Disable Audio while reconfiguring filters
+
+  fir_bpf.end();          // turn off the BPF - IF filters are not used in TX mode
+  post_fir.end();         // turn off 2.4kHz post filter  
+
+  cw_tone_i.begin(1.0, CW_FREQ, TONE_TYPE_SINE);
+  cw_tone_q.begin(1.0, CW_FREQ, TONE_TYPE_SINE);
+  if (mode == CW) {
+    cw_tone_q.phase(90);
+  } else if (mode == CWR) {
+    cw_tone_i.phase(90);
+  }
+  audio_channel_setup(ROUTE_CW_TX);           // switch audio outs to CW I & Q 
+  audio_shield.volume(CW_SIDETONE_VOLUME);    // fixed level for TX  
+  AudioInterrupts(); 
 }
 
 void setup() {
@@ -506,7 +535,7 @@ void setup() {
   audio_shield.volume(volume);
   audio_shield.unmuteLineout();
 
-  setup_RX(mode_current);
+  init_rx(mode_current);
 }
 void display_mode() {
   lcd.setCursor(0, 1);
@@ -539,7 +568,7 @@ void* mode_process(Bounce* bounce, void* data) {
     handle_encoder(NULL, set_mode);
     if (_mode_current != mode_current) {
       display_mode();
-      setup_RX(mode_current);
+      init_rx(mode_current);
     }
     delay(50);
   } while (true);
