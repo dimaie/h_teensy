@@ -46,6 +46,7 @@ uint8_t PCF8574::value()
 void PCF8574::write8(uint8_t value)
 {
   Wire.beginTransmission(_address);
+  Serial.println(value, BIN);
   _data = value;
   Wire.write(_data);
   _error = Wire.endTransmission();

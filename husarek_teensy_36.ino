@@ -27,7 +27,7 @@
 #define ENC_1                           4
 #define ENC_2                           5
 #define BUTTON_1                        24
-#define SETTINGS_MENU_SIZE              7
+#define SETTINGS_MENU_SIZE              8
 #define FREQ_STEP_IDX                   0
 #define ATT_IDX                         1
 #define AMP_1_IDX                       2
@@ -35,6 +35,7 @@
 #define OSC_SHIFT_IDX                   4
 #define OSC_MULT_IDX                    5
 #define INPUT_L_SENS_IDX                6
+#define TX_IDX                          7
 #define ROUTE_RX                        0     // used for all recieve modes
 #define ROUTE_CW_TX                     1     // CW modes
 #define INITIAL_VOLUME                  .5    // 0-1.0 output volume on startup
@@ -69,9 +70,9 @@ struct FilterArray {
 };
 
 FilterArray filters[] = {
-  {.f_array = postfir_700, .len = COEFF_700}, 
+  {.f_array = postfir_700, .len = COEFF_700},
   {.f_array = postfir_lpf, .len = COEFF_LPF},
-  {.f_array = firbpf_usb, .len = BPF_COEFFS}, 
+  {.f_array = firbpf_usb, .len = BPF_COEFFS},
   {.f_array = firbpf_lsb, .len = BPF_COEFFS}
 };
 
@@ -113,7 +114,7 @@ struct MenuItem {
 MenuItem settings[SETTINGS_MENU_SIZE];
 const uint8_t MENU_PROCESS_COMPLETED          = 2;
 const uint8_t MENU_ITEM_PROCESS_COMPLETED     = 3;
-const uint8_t CONF_VERSION                    = 2;
+const uint8_t CONF_VERSION                    = 1;
 const uint8_t EEPROM_OFFSET                   = 0;
 const uint32_t starting_frequency             = 10000000;
 const uint32_t min_frequency                  = 1500000;
@@ -123,7 +124,6 @@ const uint8_t button_pin_1                    = 32;
 const uint8_t button_pin_2                    = 31;
 uint8_t settings_index                        = 0;
 const int input_rx                            = AUDIO_INPUT_LINEIN;
-uint8_t radio_board_config                    = 0;
 float volume                                  = INITIAL_VOLUME;
 int8_t mode_current                           = CW;
 
@@ -179,7 +179,7 @@ AudioConnection c30(post_fir, 0, smeter, 0);         // RX signal S-Meter measur
 //
 AudioConnection c31(post_fir, 0, audio_selector_i, ROUTE_RX);           // mono RX audio and AGC Gain loop adjust
 AudioConnection c32(post_fir, 0, audio_selector_q, ROUTE_RX);           // mono RX audio to 2nd channel
-AudioConnection c35(cw_tone_i, 0, audio_selector_i, ROUTE_CW_TX);         // CW TX I audio 
+AudioConnection c35(cw_tone_i, 0, audio_selector_i, ROUTE_CW_TX);         // CW TX I audio
 AudioConnection c36(cw_tone_q, 0, audio_selector_q, ROUTE_CW_TX);         // CW TX Q audio
 AudioConnection c40(audio_selector_i, 0, agc_peak, 0);                  // AGC Gain loop measure
 AudioConnection c41(audio_selector_i, 0, audio_output, 0);              // Output the sum on both channels
@@ -208,24 +208,61 @@ bool read_conf() {
   return true;
 }
 
-void set_radio_board_config(uint8_t value, uint8_t offset) {
-  radio_board_config = value ? (radio_board_config | (1 << offset)) : (radio_board_config & ~(1 << offset));
+uint8_t set_radio_board_config(uint8_t radio_board_config, uint8_t value, uint8_t offset) {
+  return value ? (radio_board_config | (1 << offset)) : (radio_board_config & ~(1 << offset));
+}
+uint8_t get_radio_board_config() {
+  uint8_t radio_board_config = 0;
+  radio_board_config = set_radio_board_config(radio_board_config, settings[AMP_1_IDX].value, P2);
+  radio_board_config = set_radio_board_config(radio_board_config, settings[AMP_2_IDX].value, P3);
+  radio_board_config = set_radio_board_config(radio_board_config, settings[ATT_IDX].value, P1);
+  radio_board_config = set_radio_board_config(radio_board_config, settings[TX_IDX].value, P6);
+  return radio_board_config;
+}
+
+void rx_tx(uint8_t rx_tx_flag) {
+  if (rx_tx_flag) {
+    Serial.println("TX");
+    // turn off all amplifiers and attenuator
+    uint8_t radio_board_config = get_radio_board_config();
+    radio_board_config = set_radio_board_config(radio_board_config, 0, P2);
+    radio_board_config = set_radio_board_config(radio_board_config, 0, P3);
+    radio_board_config = set_radio_board_config(radio_board_config, 0, P1);
+    PCF_39.write8(radio_board_config);
+    init_tx(mode_current);
+  } else {
+    Serial.println("RX");
+    // restore radio board configuration
+    PCF_39.write8(get_radio_board_config());
+    init_rx(mode_current);
+  }
 }
 
 void apply_settings(uint8_t old_radio_board_config) {
-  set_radio_board_config(settings[AMP_1_IDX].value, P2);
-  set_radio_board_config(settings[AMP_2_IDX].value, P3);
-  set_radio_board_config(settings[ATT_IDX].value, P1);
+  uint8_t radio_board_config = get_radio_board_config();
+  Serial.print("old config: ");
+  Serial.println(old_radio_board_config, BIN);
+  Serial.print("new config: ");
+  Serial.println(radio_board_config, BIN);
+
   // update frequency, in case if multiplier has been changed
   update_frequency();
   // update line sensitivity
   uint8_t line_in_sens = settings[INPUT_L_SENS_IDX].value;
   audio_shield.lineInLevel(line_in_sens);
-  // update radio board configuration, in case if it has been changed
-  if (old_radio_board_config != radio_board_config) {
-    PCF_39.write8(radio_board_config);
+  // rx/tx - apply only if changed
+  uint8_t old_tx_rx = (old_radio_board_config & (1 << P6)) ? 1 : 0;
+  uint8_t new_tx_rx = (radio_board_config & (1 << P6)) ? 1 : 0;
+  if (old_tx_rx != new_tx_rx) {
+    rx_tx(new_tx_rx);
+  } else {
+    // update radio board configuration, in case if it has been changed
+    if (old_radio_board_config != radio_board_config) {
+      PCF_39.write8(radio_board_config);
+    }
   }
 }
+
 void write_conf() {
   EEPROM.write(EEPROM_OFFSET, CONF_VERSION);
 
@@ -254,7 +291,7 @@ void init_menu() {
   strcpy(modes[SSB_LSB].label, "LSB");
   modes[SSB_LSB].mode = SSB_LSB;
   modes[SSB_LSB].bpf = &filters[3];
-  modes[SSB_LSB].lpf = &filters[1];   
+  modes[SSB_LSB].lpf = &filters[1];
   // frequency step
   int32_t _array[10] = {10, 50, 100, 1000, 10000, 100000, 1000000};
   strcpy(settings[FREQ_STEP_IDX].prompt, "Step:");
@@ -304,6 +341,13 @@ void init_menu() {
   settings[INPUT_L_SENS_IDX].item_settings.non_array_settings.min_value = 0;
   settings[INPUT_L_SENS_IDX].item_settings.non_array_settings.max_value = 15;
   settings[INPUT_L_SENS_IDX].item_settings.non_array_settings.step = 1;
+  // tx
+  strcpy(settings[TX_IDX].prompt, "TX:");
+  settings[TX_IDX].value = 0;
+  settings[TX_IDX].is_array = false;
+  settings[TX_IDX].item_settings.non_array_settings.min_value = 0;
+  settings[TX_IDX].item_settings.non_array_settings.max_value = 1;
+  settings[TX_IDX].item_settings.non_array_settings.step = 1;
 }
 
 void display_frequency(uint32_t frequency) {
@@ -417,7 +461,7 @@ void* volume_process(Bounce* bounce, void* data) {
     handle_encoder(NULL, set_volume);
     if (volume != _volume) {
       display_volume();
-      audio_shield.volume(volume);    
+      audio_shield.volume(volume);
     }
     delay(50);
   } while (true);
@@ -453,12 +497,12 @@ void update_frequency() {
 
 float audiolevels_i[2][4] = {
   RX_LEVEL_I, 0, 0, 0,        // RX mode channel levels
-  0, 0, CW_TX_LEVEL_I, 0      // CW TX mode channel levels
+  0, CW_TX_LEVEL_I, 0, 0      // CW TX mode channel levels
 };
 
 float audiolevels_q[2][4] = {
   RX_LEVEL_Q, 0, 0, 0,        // RX mode channel levels
-  0, 0, CW_TX_LEVEL_Q, 0      // CW TX mode channel levels
+  0, CW_TX_LEVEL_Q, 0, 0      // CW TX mode channel levels
 };
 
 void audio_channel_setup(int route) {
@@ -471,7 +515,10 @@ void audio_channel_setup(int route) {
 // set up radio for RX modes - USB, LSB etc
 void init_rx(int mode) {
   AudioNoInterrupts();   // Disable Audio while reconfiguring filters
-
+  
+  cw_tone_i.amplitude(0);  // turn off cw oscillators to reduce cpu use
+  cw_tone_q.amplitude(0);
+  
   audio_shield.inputSelect(input_rx); // RX mode uses line ins
   audio_channel_setup(ROUTE_RX);   // switch audio path to RX processing chain
   audio_shield.lineInLevel(settings[INPUT_L_SENS_IDX].value);
@@ -492,8 +539,15 @@ void init_rx(int mode) {
 void init_tx(int mode) {
   AudioNoInterrupts();    // Disable Audio while reconfiguring filters
 
+  // cw is the only tx supported mode
+  if (mode == SSB_USB) {
+    mode = CW;
+  } else if (mode_current == SSB_LSB) {
+    mode = CWR;
+  }
+
   fir_bpf.end();          // turn off the BPF - IF filters are not used in TX mode
-  post_fir.end();         // turn off 2.4kHz post filter  
+  post_fir.end();         // turn off 2.4kHz post filter
 
   cw_tone_i.begin(1.0, CW_FREQ, TONE_TYPE_SINE);
   cw_tone_q.begin(1.0, CW_FREQ, TONE_TYPE_SINE);
@@ -502,9 +556,9 @@ void init_tx(int mode) {
   } else if (mode == CWR) {
     cw_tone_i.phase(90);
   }
-  audio_channel_setup(ROUTE_CW_TX);           // switch audio outs to CW I & Q 
-  audio_shield.volume(CW_SIDETONE_VOLUME);    // fixed level for TX  
-  AudioInterrupts(); 
+  audio_channel_setup(ROUTE_CW_TX);           // switch audio outs to CW I & Q
+  audio_shield.volume(CW_SIDETONE_VOLUME);    // fixed level for TX
+  AudioInterrupts();
 }
 
 void setup() {
@@ -516,7 +570,7 @@ void setup() {
   // init lcd
   lcd.init();                           // initialize the lcd
   lcd.backlight();
-  
+
   si570.init();
 
   encoder.write(0);
@@ -524,9 +578,11 @@ void setup() {
   set_frequency(0, 0, 0, NULL);
   init_menu();
 
+
   if (!read_conf()) {
     write_conf();
   }
+  apply_settings(0);
 
   AudioMemory(16);
 
@@ -580,17 +636,17 @@ void* mode_process(Bounce* bounce, void* data) {
 }
 
 void loop() {
-  uint8_t old_radio_board_config = radio_board_config;
+  uint8_t old_radio_board_config = get_radio_board_config();
   if (button_handle(&menu_button, process_settings_menu, NULL) == MENU_PROCESS_COMPLETED) {
     // apply settings
     apply_settings(old_radio_board_config);
   }
-  
+
   if (slbutton_handle(&function_button, volume_process, mode_process, NULL) == MENU_PROCESS_COMPLETED) {
     // process_volume clears screen, so update frequency
     // after it has been completed
     update_frequency();
   }
-  
+
   handle_encoder(NULL, set_frequency);
 }
