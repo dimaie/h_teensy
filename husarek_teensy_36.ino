@@ -58,6 +58,21 @@
 #define CW_OFF                          4
 #define RX_OFF                          5
 #define TX_OFF                          6
+#define KEYER_SPEED_FACTOR              1000
+#define NOP_DELAY_KEYER                 34000
+#define TX_TIMEOUT                      700
+
+enum CWKeyUpDownState {
+  UP = 0, DOWN = 1
+};
+
+enum CWKeyDitDahState {
+  DIT = 1, DAH = 3
+};
+
+enum RxTx {
+  RX = 0, TX = 1
+};
 
 struct FilterArray {
   short* f_array;
@@ -115,12 +130,15 @@ const uint32_t starting_frequency             = 10000000;
 const uint32_t min_frequency                  = 1500000;
 const uint32_t max_frequency                  = 57000000;
 uint32_t _frequency                           = starting_frequency;
+const uint8_t dit_pin                         = 29;
+const uint8_t dah_pin                         = 30;
 const uint8_t button_pin_1                    = 32;
 const uint8_t button_pin_2                    = 31;
 uint8_t settings_index                        = 0;
 const int input_rx                            = AUDIO_INPUT_LINEIN;
 float volume                                  = INITIAL_VOLUME;
 int8_t mode_current                           = CW;
+uint8_t keyer_speed                           = 20;
 
 Bounce menu_button = Bounce(button_pin_1, 5);
 Bounce function_button = Bounce(button_pin_2, 5);
@@ -211,8 +229,11 @@ uint8_t get_radio_board_config() {
   return radio_board_config;
 }
 
-void rx_tx(uint8_t rx_tx_flag) {
-  if (rx_tx_flag) {
+void rx_tx(RxTx _rx_tx_state) {
+  if (get_current_rx_tx_state() == _rx_tx_state) {
+    return;
+  }
+  if (_rx_tx_state) {
     Serial.println("TX");
     // turn off all amplifiers and attenuator
     uint8_t radio_board_config = get_radio_board_config();
@@ -228,6 +249,14 @@ void rx_tx(uint8_t rx_tx_flag) {
   }
 }
 
+RxTx get_current_rx_tx_state() {
+  return get_rx_tx_state(get_radio_board_config());
+}
+
+RxTx get_rx_tx_state(uint8_t radio_board_config) {
+  return (radio_board_config & (1 << P6)) ? TX : RX;
+}
+
 void apply_settings(uint8_t old_radio_board_config) {
   uint8_t radio_board_config = get_radio_board_config();
   Serial.print("old config: ");
@@ -241,8 +270,8 @@ void apply_settings(uint8_t old_radio_board_config) {
   uint8_t line_in_sens = settings[INPUT_L_SENS_IDX].value;
   audio_shield.lineInLevel(line_in_sens);
   // rx/tx - apply only if changed
-  uint8_t old_tx_rx = (old_radio_board_config & (1 << P6)) ? 1 : 0;
-  uint8_t new_tx_rx = (radio_board_config & (1 << P6)) ? 1 : 0;
+  RxTx old_tx_rx = get_rx_tx_state(old_radio_board_config);
+  RxTx new_tx_rx = get_current_rx_tx_state();
   if (old_tx_rx != new_tx_rx) {
     rx_tx(new_tx_rx);
   } else {
@@ -503,7 +532,7 @@ void audio_channel_setup(int route) {
 // set up radio for RX modes - USB, LSB etc
 void init_rx(int mode) {
   AudioNoInterrupts();   // Disable Audio while reconfiguring filters
-  
+
   audio_shield.inputSelect(input_rx); // RX mode uses line ins
   audio_channel_setup(ROUTE_RX);   // switch audio path to RX processing chain
   audio_shield.lineInLevel(settings[INPUT_L_SENS_IDX].value);
@@ -526,6 +555,8 @@ void setup() {
 
   pinMode(button_pin_1, INPUT_PULLUP);
   pinMode(button_pin_2, INPUT_PULLUP);
+  pinMode(dit_pin, INPUT_PULLUP);
+  pinMode(dah_pin, INPUT_PULLUP);
 
   // init lcd
   lcd.init();                           // initialize the lcd
@@ -593,6 +624,68 @@ void* mode_process(Bounce* bounce, void* data) {
   lcd.setCursor(0, 1);
   lcd.print("                ");
   return MENU_PROCESS_COMPLETED;
+}
+
+bool is_key_pressed(uint8_t key, uint8_t line_state) {
+  for (uint8_t k = 0; k < 5; ++k) {
+    if (digitalRead(key) != line_state) {
+      return false;
+    }
+    delay(1);
+  }
+  return true;
+}
+
+void press_cw_key(CWKeyUpDownState key_state) {
+
+  if (get_current_rx_tx_state() == RX) {
+    rx_tx(TX);
+  }
+  delay(NOP_DELAY_KEYER);
+}
+
+long time;
+
+void handle_key(CWKeyDitDahState key_state, bool active) {
+  int16_t delay__ = (KEYER_SPEED_FACTOR / keyer_speed) * key_state - 50;
+
+  if (active) {
+    press_cw_key(DOWN);
+  } else {
+    delay(NOP_DELAY_KEYER);
+  }
+  delay(delay__);
+  if (active) {
+    press_cw_key(UP);
+    // reset timer
+    time = millis();
+  } else {
+    delay(NOP_DELAY_KEYER);
+  }
+}
+
+void keyer() {
+  // set time variable with the value 0,
+  // so that the diff calculated at
+  // the end of the function will be always
+  // bigger than the timeout value
+  time = 0;
+  bool finished = true;
+  do {
+    if (is_key_pressed(dit_pin, LOW)) {
+      handle_key(DIT, true);
+      finished = false;
+    } else if (is_key_pressed(dah_pin, LOW)) {
+      handle_key(DAH, true);
+      finished = false;
+    } else {
+      finished = true;
+    }
+    // pause between elements
+    if (!finished) {
+      handle_key(DIT, false);
+    }
+  } while (!finished && ((millis() - time) < TX_TIMEOUT));
 }
 
 void loop() {
