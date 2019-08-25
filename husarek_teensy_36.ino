@@ -41,6 +41,7 @@
 #define RX_LEVEL_I                      1.0   // 0-1.0 adjust for RX I/Q balance
 #define RX_LEVEL_Q                      1.0   // 0-1.0 adjust for RX I/Q balance
 #define IF_FREQ                         11000 // IF Oscillator frequency
+#define CW_FREQ                         700  
 #define TONE_TYPE_SINE                  0
 #define TONE_TYPE_SAWTOOTH              1
 #define TONE_TYPE_SQUARE                2
@@ -58,9 +59,10 @@
 #define CW_OFF                          4
 #define RX_OFF                          5
 #define TX_OFF                          6
-#define KEYER_SPEED_FACTOR              1000
-#define NOP_DELAY_KEYER                 34000
+#define KEYER_SPEED_FACTOR              1200
 #define TX_TIMEOUT                      700
+#define CW_SELF_CONTROL_LEVEL           0.3
+#define ROUTE_CW_TX                     1    // CW modes
 
 enum CWKeyUpDownState {
   UP = 0, DOWN = 1
@@ -130,6 +132,7 @@ const uint32_t starting_frequency             = 10000000;
 const uint32_t min_frequency                  = 1500000;
 const uint32_t max_frequency                  = 57000000;
 uint32_t _frequency                           = starting_frequency;
+const uint8_t cw_ptt_pin                      = 28;
 const uint8_t dit_pin                         = 29;
 const uint8_t dah_pin                         = 30;
 const uint8_t button_pin_1                    = 32;
@@ -159,6 +162,7 @@ AudioFilterFIR      post_fir;
 
 AudioMixer4         summer;         // summer (add inputs)
 AudioSynthWaveform  if_osc;         // Local Oscillator
+AudioSynthWaveform  cw_self_control;      // cw self control
 AudioEffectMultiply mixer;          // mixer (multiply inputs)
 AudioAnalyzePeak    smeter;         // Measure Audio Peak for S meter
 AudioMixer4         audio_selector_i;   // summer used for AGC and audio switch
@@ -190,6 +194,8 @@ AudioConnection c30(post_fir, 0, smeter, 0);         // RX signal S-Meter measur
 //
 AudioConnection c31(post_fir, 0, audio_selector_i, ROUTE_RX);           // mono RX audio and AGC Gain loop adjust
 AudioConnection c32(post_fir, 0, audio_selector_q, ROUTE_RX);           // mono RX audio to 2nd channel
+AudioConnection c35(cw_self_control,0, audio_selector_i, ROUTE_CW_TX);         // CW TX self control
+AudioConnection c36(cw_self_control,0, audio_selector_q, ROUTE_CW_TX);         // CW TX self control
 AudioConnection c40(audio_selector_i, 0, agc_peak, 0);                  // AGC Gain loop measure
 AudioConnection c41(audio_selector_i, 0, audio_output, 0);              // Output the sum on both channels
 AudioConnection c42(audio_selector_q, 0, audio_output, 1);
@@ -237,14 +243,21 @@ void rx_tx(RxTx _rx_tx_state) {
     Serial.println("TX");
     // turn off all amplifiers and attenuator
     uint8_t radio_board_config = get_radio_board_config();
+    radio_board_config = set_radio_board_config(radio_board_config, 1, P6);
     radio_board_config = set_radio_board_config(radio_board_config, 0, P2);
     radio_board_config = set_radio_board_config(radio_board_config, 0, P3);
     radio_board_config = set_radio_board_config(radio_board_config, 0, P1);
+    // write TX bit, so that get_rx_tx_state returns TX
+    settings[TX_IDX].value = 1;
     PCF_39.write8(radio_board_config);
+    audio_channel_setup(ROUTE_CW_TX);
   } else {
     Serial.println("RX");
     // restore radio board configuration
-    PCF_39.write8(get_radio_board_config());
+    uint8_t radio_board_config = get_radio_board_config();
+    radio_board_config = set_radio_board_config(radio_board_config, 0, P6);
+    settings[TX_IDX].value = 0;
+    PCF_39.write8(radio_board_config);
     init_rx(mode_current);
   }
 }
@@ -514,12 +527,14 @@ void update_frequency() {
   set_frequency(0, 0, 0, NULL);
 }
 
-float audiolevels_i[1][4] = {
+float audiolevels_i[2][4] = {
   RX_LEVEL_I, 0, 0, 0,        // RX mode channel levels
+  0, CW_SELF_CONTROL_LEVEL, 0, 0
 };
 
 float audiolevels_q[2][4] = {
   RX_LEVEL_Q, 0, 0, 0,        // RX mode channel levels
+  0, CW_SELF_CONTROL_LEVEL, 0, 0
 };
 
 void audio_channel_setup(int route) {
@@ -535,6 +550,7 @@ void init_rx(int mode) {
 
   audio_shield.inputSelect(input_rx); // RX mode uses line ins
   audio_channel_setup(ROUTE_RX);   // switch audio path to RX processing chain
+
   audio_shield.lineInLevel(settings[INPUT_L_SENS_IDX].value);
 
   if_osc.begin(1.0, IF_FREQ, TONE_TYPE_SINE);
@@ -557,7 +573,8 @@ void setup() {
   pinMode(button_pin_2, INPUT_PULLUP);
   pinMode(dit_pin, INPUT_PULLUP);
   pinMode(dah_pin, INPUT_PULLUP);
-
+  pinMode(cw_ptt_pin, OUTPUT);
+  digitalWrite(cw_ptt_pin, LOW);
   // init lcd
   lcd.init();                           // initialize the lcd
   lcd.backlight();
@@ -583,6 +600,9 @@ void setup() {
   audio_shield.unmuteLineout();
 
   init_rx(mode_current);
+  // start self control oscillator,
+  // no output
+  cw_self_control.begin(0, CW_FREQ, TONE_TYPE_SINE); 
 }
 void display_mode() {
   lcd.setCursor(0, 1);
@@ -637,31 +657,32 @@ bool is_key_pressed(uint8_t key, uint8_t line_state) {
 }
 
 void press_cw_key(CWKeyUpDownState key_state) {
-
-  if (get_current_rx_tx_state() == RX) {
-    rx_tx(TX);
+  if (key_state == DOWN) {
+    if (get_current_rx_tx_state() == RX) {
+      rx_tx(TX);
+    }
+    cw_self_control.amplitude(CW_SELF_CONTROL_LEVEL);
+    digitalWrite(cw_ptt_pin, HIGH);
+  } else if (key_state == UP) {
+    digitalWrite(cw_ptt_pin, LOW);
+    cw_self_control.amplitude(0);  
   }
-  delay(NOP_DELAY_KEYER);
 }
 
 long time;
 
 void handle_key(CWKeyDitDahState key_state, bool active) {
-  int16_t delay__ = (KEYER_SPEED_FACTOR / keyer_speed) * key_state - 50;
-
+  int16_t single_delay = KEYER_SPEED_FACTOR / keyer_speed;
+  int16_t delay__ = single_delay * key_state;
   if (active) {
     press_cw_key(DOWN);
-  } else {
-    delay(NOP_DELAY_KEYER);
-  }
+  } 
   delay(delay__);
   if (active) {
     press_cw_key(UP);
     // reset timer
     time = millis();
-  } else {
-    delay(NOP_DELAY_KEYER);
-  }
+  } 
 }
 
 void keyer() {
@@ -670,6 +691,7 @@ void keyer() {
   // the end of the function will be always
   // bigger than the timeout value
   time = 0;
+  long timeout = millis();
   bool finished = true;
   do {
     if (is_key_pressed(dit_pin, LOW)) {
@@ -684,8 +706,13 @@ void keyer() {
     // pause between elements
     if (!finished) {
       handle_key(DIT, false);
-    }
-  } while (!finished && ((millis() - time) < TX_TIMEOUT));
+    }  
+    timeout = millis() - time;
+  } while (!finished || (timeout < TX_TIMEOUT));
+  // switch to rx
+  if (get_current_rx_tx_state() == TX) {
+    rx_tx(RX);
+  }
 }
 
 void loop() {
@@ -700,6 +727,6 @@ void loop() {
     // after it has been completed
     update_frequency();
   }
-
+  keyer();
   handle_encoder(NULL, set_frequency);
 }
