@@ -2,18 +2,30 @@
 
 #include <EEPROM.h>
 
-#include <SI570.h>
+#include "SI570.h"
 #include <unistd.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
-#include <LiquidCrystal_I2C.h>
 #include <Encoder.h>
+#include <LiquidCrystal_I2C.h>
 #include "filters.h"
 #include "PCF8574.h"
 #include "buttons_handler.h"
+
+// Define DEBUG_MODE to enable debug prints
+#define DEBUG_MODE 1
+
+// Debug macro function
+#ifdef DEBUG_MODE
+  #define DEBUG_PRINT(x)  Serial.print(x)
+  #define DEBUG_PRINTLN(x)  Serial.println(x)
+#else
+  #define DEBUG_PRINT(x)
+  #define DEBUG_PRINTLN(x)
+#endif
 
 #define LCD_ADDR                        0x27
 #define P0                              0
@@ -568,28 +580,34 @@ void init_rx(int mode) {
 
 void setup() {
   Serial.begin(9600);
-
+  DEBUG_PRINTLN("debug mode");
   pinMode(button_pin_1, INPUT_PULLUP);
   pinMode(button_pin_2, INPUT_PULLUP);
   pinMode(dit_pin, INPUT_PULLUP);
   pinMode(dah_pin, INPUT_PULLUP);
   pinMode(cw_ptt_pin, OUTPUT);
   digitalWrite(cw_ptt_pin, LOW);
+  DEBUG_PRINTLN("i/o init complete");
   // init lcd
   lcd.init();                           // initialize the lcd
   lcd.backlight();
+  DEBUG_PRINTLN("lcd init complete");
 
   si570.init();
+  DEBUG_PRINTLN("si570 init complete");
 
   encoder.write(0);
 
   set_frequency(0, 0, 0, NULL);
   init_menu();
+  DEBUG_PRINTLN("menu init complete");
 
 
   if (!read_conf()) {
     write_conf();
   }
+  DEBUG_PRINTLN("configuration has been processed");
+
   apply_settings(0);
 
   AudioMemory(16);
@@ -598,8 +616,12 @@ void setup() {
   audio_shield.enable();
   audio_shield.volume(volume);
   audio_shield.unmuteLineout();
+  DEBUG_PRINTLN("audio init complete");
+
 
   init_rx(mode_current);
+  DEBUG_PRINTLN("rx init complete");
+
   // start self control oscillator,
   // no output
   cw_self_control.begin(0, CW_FREQ, TONE_TYPE_SINE); 
@@ -669,7 +691,7 @@ void press_cw_key(CWKeyUpDownState key_state) {
   }
 }
 
-long time;
+long _time;
 
 void handle_key(CWKeyDitDahState key_state, bool active) {
   int16_t single_delay = KEYER_SPEED_FACTOR / keyer_speed;
@@ -681,7 +703,7 @@ void handle_key(CWKeyDitDahState key_state, bool active) {
   if (active) {
     press_cw_key(UP);
     // reset timer
-    time = millis();
+    _time = millis();
   } 
 }
 
@@ -690,7 +712,7 @@ void keyer() {
   // so that the diff calculated at
   // the end of the function will be always
   // bigger than the timeout value
-  time = 0;
+  _time = 0;
   long timeout = millis();
   bool finished = true;
   do {
@@ -707,7 +729,7 @@ void keyer() {
     if (!finished) {
       handle_key(DIT, false);
     }  
-    timeout = millis() - time;
+    timeout = millis() - _time;
   } while (!finished || (timeout < TX_TIMEOUT));
   // switch to rx
   if (get_current_rx_tx_state() == TX) {
